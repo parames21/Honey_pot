@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Log Dashboard</title>
+  <!-- Load Chart.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+      body { font-family: Arial, sans-serif; margin: 20px; }
+      canvas { max-width: 800px; }
+  </style>
+</head>
+<body>
+  <h1>Log Dashboard</h1>
+  <canvas id="logChart" width="800" height="400"></canvas>
+  <script>
+    // Ensure JSON is correctly parsed into JavaScript arrays
+    const logLabels = JSON.parse('{{ labels | tojson | safe }}');
+    const logCounts = JSON.parse('{{ counts | tojson | safe }}');
+  
+    const data = {
+      labels: logLabels,
+      datasets: [{
+        label: "Log Count per Minute",
+        data: logCounts,
+        borderColor: "rgba(75, 192, 192, 1)",
+        backgroundColor: "rgba(75, 192, 192, 0.2)",
+        fill: true,
+        tension: 0.4
+      }]
+    };
+  
+    const config = {
+      type: "line",
+      data: data,
+      options: {
+        scales: {
+          x: { 
+            display: true, 
+            title: { display: true, text: "Time" } 
+          },
+          y: { 
+            display: true, 
+            title: { display: true, text: "Log Count" },
+            beginAtZero: true
+          }
+        }
+      }
+    };
+  
+    // Initialize the Chart.js line chart
+    var logChart = new Chart(
+      document.getElementById("logChart"),
+      config
+    );
+  </script>
+    
+</body>
+</html>
