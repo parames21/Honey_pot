@@ -1,39 +1,32 @@
-import logging
+import threading
+import subprocess
+import sys
+import os
+from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_sqlalchemy import SQLAlchemy
 from functools import wraps
 from datetime import datetime
 from flask_migrate import Migrate
+import time
+import logging
+from werkzeug.security import generate_password_hash, check_password_hash  # Added for proper password handling
 
-# Initialize Flask application and database
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
+# Initialize Flask application
 def initialize_app():
     app = Flask(__name__)
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///honey_db.sqlite3'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['SECRET_KEY'] = 'parames@123'
-    
-    db.init_app(app)
-    Migrate(app, db)
-    
-    # Create database tables within application context
-    with app.app_context():
-        db.create_all()
-    
     return app
 
-# Remove logging-related decorators
-@app.before_request
-def log_request_info():
-    pass
-
-@app.after_request
-def log_response_info(response):
-    return response
-
-# Initialize database
-db = SQLAlchemy()
+# Initialize app first, then database
 app = initialize_app()
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
 
 # Define models
 class User(db.Model):
@@ -72,6 +65,10 @@ class OrderItem(db.Model):
     product = db.relationship('Product')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+# Create tables
+with app.app_context():
+    db.create_all()
+
 # Log HTTP requests and responses
 @app.before_request
 def log_request_info():
@@ -96,7 +93,7 @@ def admin_required(f):
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session or session.get('role') != 'admin':
             flash('Access denied.')
-            return redirect(url_for('index'))
+            return redirect(url_for('home'))  # Changed to 'home' for consistency
         return f(*args, **kwargs)
     return decorated_function
 
@@ -105,7 +102,6 @@ def admin_required(f):
 def home():
     return render_template('index.html')
 
-# Update login route to include brute force protection
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -113,7 +109,7 @@ def login():
         password = request.form['password']
         user = User.query.filter_by(email=email).first()
 
-        if user and user.password == password:
+        if user and check_password_hash(user.password, password):
             session['user_id'] = user.id
             session['role'] = user.role
             if user.role == 'admin':
@@ -129,22 +125,16 @@ def signup():
         email = request.form['email']
         password = request.form['password']
         
-        # Check if email already exists in the database
         existing_user = User.query.filter_by(email=email).first()
         if existing_user:
             flash('Email is already in use.')
             logging.warning(f"Attempted signup with existing email: {email}")
             return redirect(url_for('signup'))
 
-        # Hash the password
-        #hashed_password = generate_password_hash(password)
-        hashed_password = password
-
-        # Create a new user with default role 'user'
+        hashed_password = generate_password_hash(password)
         new_user = User(email=email, password=hashed_password, role='user')
 
         try:
-            # Save new user to the database
             db.session.add(new_user)
             db.session.commit()
             flash('Signup successful! Please log in.')
@@ -159,6 +149,8 @@ def signup():
 @app.route('/logout')
 def logout():
     user_id = session.pop('user_id', None)
+    session.pop('role', None)
+    session.pop('cart', None)
     logging.info(f"User {user_id} logged out.")
     return redirect(url_for('home'))
 
@@ -167,9 +159,8 @@ def logout():
 def buy():
     products = Product.query.filter(Product.stock > 0).all()
     
-    # Calculate the cart total if 'cart' exists in the session
     total = 0
-    if 'cart' in session:
+    if 'cart' in session and session['cart']:
         total = sum(item['price'] * item['quantity'] for item in session['cart'])
     
     return render_template('buy.html', products=products, total=total)
@@ -180,36 +171,39 @@ def add_to_cart():
     product_id = request.form['product_id']
     product = Product.query.get(product_id)
 
-    if product and product.stock > 0:
-        # If product exists and is in stock, add to cart
-        cart_item = {
-            'id': product.id,
-            'name': product.name,
-            'price': product.price,
-            'quantity': 1  # Default to 1 item added
-        }
+    if not product:
+        flash('Product not found.')
+        return redirect(url_for('buy'))
 
-        # Check if the cart already exists in the session
-        if 'cart' not in session:
-            session['cart'] = []
-
-        # Check if the product is already in the cart and update its quantity if so
-        for item in session['cart']:
-            if item['id'] == product.id:
-                item['quantity'] += 1
-                break
-        else:
-            # Add new item to cart if it's not already in it
-            session['cart'].append(cart_item)
-
-        session.modified = True  # Mark the session as modified
-        flash(f'{product.name} added to cart.')
-        logging.info(f"Product {product.name} added to cart by user {session['user_id']}.")
-    else:
+    if product.stock <= 0:
         flash('Product is out of stock.')
-        logging.warning(f"Attempt to add out-of-stock product to cart by user {session['user_id']}.")
+        logging.warning(f"Attempt to add out-of-stock product {product.name} to cart by user {session['user_id']}.")
+        return redirect(url_for('buy'))
 
-    return redirect(url_for('buy'))  # Redirect back to the buy page
+    cart_item = {
+        'id': product.id,
+        'name': product.name,
+        'price': product.price,
+        'quantity': 1
+    }
+
+    if 'cart' not in session:
+        session['cart'] = []
+
+    for item in session['cart']:
+        if item['id'] == product.id:
+            if product.stock < item['quantity'] + 1:
+                flash(f'Only {product.stock} {product.name} left in stock.')
+                return redirect(url_for('buy'))
+            item['quantity'] += 1
+            break
+    else:
+        session['cart'].append(cart_item)
+
+    session.modified = True
+    flash(f'{product.name} added to cart.')
+    logging.info(f"Product {product.name} added to cart by user {session['user_id']}.")
+    return redirect(url_for('buy'))
 
 @app.route('/checkout', methods=['POST'])
 @login_required
@@ -219,13 +213,19 @@ def checkout():
             flash('Cart is empty.')
             return redirect(url_for('buy'))
 
+        # Verify stock one last time
+        for item in session['cart']:
+            product = Product.query.get(item['id'])
+            if product.stock < item['quantity']:
+                flash(f'Not enough stock for {product.name}. Only {product.stock} available.')
+                return redirect(url_for('buy'))
+
         total_amount = sum(item['price'] * item['quantity'] for item in session['cart'])
         new_order = Order(user_id=session['user_id'], total_amount=total_amount, status='pending')
         db.session.add(new_order)
-        db.session.flush()  # Flush to get the new order's ID
+        db.session.flush()
 
         for item in session['cart']:
-            # Create an order item for each product in the cart
             order_item = OrderItem(
                 order_id=new_order.id,
                 product_id=item['id'],
@@ -234,12 +234,11 @@ def checkout():
             )
             db.session.add(order_item)
 
-            # Update product stock after order
             product = Product.query.get(item['id'])
             product.stock -= item['quantity']
 
         db.session.commit()
-        session.pop('cart')  # Empty the cart after placing the order
+        session.pop('cart')
         flash('Order placed successfully.')
         logging.info(f"Order {new_order.id} placed by user {session['user_id']}.")
     except Exception as e:
@@ -259,12 +258,25 @@ def dashboard():
 def product():
     try:
         name = request.form['name']
-        price = float(request.form['price'])
-        stock = int(request.form['stock'])
+        price = request.form['price']
+        stock = request.form['stock']
         product_id = request.form.get('product_id')
+
+        # Input validation
+        try:
+            price = float(price)
+            stock = int(stock)
+            if price < 0 or stock < 0:
+                raise ValueError
+        except ValueError:
+            flash('Price and stock must be positive numbers.')
+            return redirect(url_for('dashboard'))
 
         if product_id:
             product = Product.query.get(product_id)
+            if not product:
+                flash('Product not found.')
+                return redirect(url_for('dashboard'))
             product.name = name
             product.price = price
             product.stock = stock
@@ -286,6 +298,10 @@ def product():
 def delete_product(product_id):
     try:
         product = Product.query.get(product_id)
+        if not product:
+            flash('Product not found.')
+            return redirect(url_for('dashboard'))
+        
         db.session.delete(product)
         db.session.commit()
         flash('Product deleted successfully.')
@@ -297,9 +313,35 @@ def delete_product(product_id):
     return redirect(url_for('dashboard'))
 
 # Start Flask app with monitoring
+def run_custom_db2():
+    """Run the database management script (custom_db2.py)"""
+    while True:
+        try:
+            subprocess.run([sys.executable, 'custom_db2.py'], check=True)
+            time.sleep(120)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Database refresh error: {e}")
+            time.sleep(60)
+        except Exception as e:
+            logging.error(f"Unexpected error in DB thread: {e}")
+            time.sleep(60)
+
+# Start Flask app with monitoring
 def start_app():
-    logging.info("Starting Flask application...")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    try:
+        # Create and start the DB thread
+        db_thread = threading.Thread(target=run_custom_db2, daemon=True)
+        db_thread.start()
+        
+        # Start Flask app
+        logging.info("Starting Flask application...")
+        app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    
+    except KeyboardInterrupt:
+        logging.info("Shutting down application...")
+    except Exception as e:
+        logging.error(f"Error in main thread: {e}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     start_app()
